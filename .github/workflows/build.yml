@@ -1,44 +1,69 @@
-name: SkinSwitch Build
+name: Build mod from ZIP
 
+# ارفع ملف الـ ZIP بتاع المود كما هو (من غير ما تفكه) على الريبو، والـ Workflow هيفكه ويبنيه ويدّيك ZIP جاهز.
 on:
-  workflow_dispatch:
   push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout project
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Java 25
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '25'
 
-      - name: Download Capes and Build Mod
-        working-directory: ./skinswitch
+      - name: Unzip the uploaded mod source
+        run: |
+          mkdir -p work
+          shopt -s nullglob
+          zips=(*.zip)
+          if [ ${#zips[@]} -eq 0 ]; then echo "No .zip found in repo root"; exit 1; fi
+          for z in "${zips[@]}"; do unzip -q -o "$z" -d work; done
+          g=$(find work -name gradlew -print -quit)
+          if [ -z "$g" ]; then echo "gradlew not found inside the zip"; exit 1; fi
+          echo "ROOT=$(dirname "$g")" >> "$GITHUB_ENV"
+
+      - name: Build (downloads the capes listed in capes-sources.txt + community capes)
+        working-directory: ${{ env.ROOT }}
         run: |
           chmod +x gradlew
-          ./gradlew build --no-daemon
+          ./gradlew build --no-daemon --stacktrace
 
-      - name: Show Downloaded Capes
+      - name: Show which capes got bundled
         if: always()
-        working-directory: ./skinswitch
+        working-directory: ${{ env.ROOT }}
         run: |
-          FILE="build/generated/capes/assets/skinswitch/capes/index.txt"
-          if [ -f "$FILE" ]; then
-            echo "Downloaded capes:"
-            cat "$FILE"
+          f=build/generated/capes/assets/skinswitch/capes/index.txt
+          if [ -f "$f" ]; then
+            echo "Capes bundled in the jar: $(grep -c . "$f")"
+            cut -d'|' -f2 "$f"
           else
-            echo "Capes index not found"
+            echo "No capes index found (the build probably failed earlier)"
           fi
 
-      - name: Upload SkinSwitch Mod
-        uses: actions/upload-artifact@v4
+      - name: Package result as ZIP
+        run: |
+          mkdir -p out
+          cp "$ROOT"/build/libs/*.jar out/
+          cp "$ROOT"/build/generated/capes/assets/skinswitch/capes/index.txt out/capes-list.txt || true
+          cd out && zip -q -r ../skinswitch-build.zip . && cd ..
+          ls -la skinswitch-build.zip
+
+      - uses: actions/upload-artifact@v4
         with:
-          name: SkinSwitch-Mod
-          path: skinswitch/build/libs/*.jar
-          if-no-files-found: error
+          name: skinswitch-build-zip
+          path: skinswitch-build.zip
+
+      - name: Publish as GitHub Release (permanent ZIP download)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "build-${{ github.run_number }}" skinswitch-build.zip \
+            --title "Build ${{ github.run_number }}" --notes "Built from the uploaded ZIP."
