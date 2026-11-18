@@ -19,25 +19,26 @@ jobs:
           java-version: '25'
 
       - name: Download Capes and Build Mod
+        working-directory: ./skinswitch
         run: |
           chmod +x gradlew
           ./gradlew build --no-daemon
 
       - name: Show Downloaded Capes
         if: always()
+        working-directory: ./skinswitch
         run: |
           FILE="build/generated/capes/assets/skinswitch/capes/index.txt"
           if [ -f "$FILE" ]; then
-            echo "Total capes:"
-            grep -c . "$FILE" || true
+            echo "Downloaded capes:"
             cat "$FILE"
           else
-            echo "Capes catalogue not found"
+            echo "Capes index not found"
           fi
 
       - name: Upload SkinSwitch Mod
         uses: actions/upload-artifact@v4
         with:
           name: SkinSwitch-Mod
-          path: build/libs/*.jar
+          path: skinswitch/build/libs/*.jar
           if-no-files-found: error
