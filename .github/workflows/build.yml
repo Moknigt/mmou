@@ -1,182 +1,43 @@
-// This is a minimal setup of a Forge mod workspace.
-// For complex examples (including AccessTransformers, Jar-in-Jar, and Mixin), see our examples repository.
-// https://github.com/MinecraftForge/MDKExamples
+name: SkinSwitch Build
 
-plugins {
-    id 'java'
-    id 'idea'
-    id 'eclipse'
-    id 'net.minecraftforge.gradle' version '[7.0.17,8)'
-}
+on:
+  workflow_dispatch:
+  push:
 
-version = '1.0.0'
-group = 'com.skinswitch'
+jobs:
+  build:
+    runs-on: ubuntu-latest
 
-// Mojang ships Java 25 to end users in 26.1+, so your mod should target Java 25.
-java.toolchain.languageVersion = JavaLanguageVersion.of(25)
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
 
-// Include generated resources
-sourceSets.main.resources { srcDir 'src/generated/resources' }
+      - name: Setup Java 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
 
-minecraft {
-    runs {
-        configureEach {
-            workingDir = layout.projectDirectory.dir('run')
+      - name: Download Capes and Build Mod
+        run: |
+          chmod +x gradlew
+          ./gradlew build --no-daemon
 
-            systemProperty 'eventbus.api.strictRuntimeChecks', 'true'
-        }
+      - name: Show Downloaded Capes
+        if: always()
+        run: |
+          FILE="build/generated/capes/assets/skinswitch/capes/index.txt"
+          if [ -f "$FILE" ]; then
+            echo "Total capes:"
+            grep -c . "$FILE" || true
+            cat "$FILE"
+          else
+            echo "Capes catalogue not found"
+          fi
 
-        register('client')
-
-        register('server') {
-            args '--nogui'
-        }
-
-        register('gameTestServer')
-
-        register('data') {
-            workingDir = layout.projectDirectory.dir('run-data')
-
-            args '--mod', 'skinswitch', '--all', '--output', layout.projectDirectory.dir('src/generated/resources'), '--existing', layout.projectDirectory.dir('src/main/resources')
-        }
-    }
-}
-
-repositories {
-    minecraft.mavenizer(it) // In Kotlin, it = this
-    maven fg.forgeMaven
-    maven fg.minecraftLibsMaven
-    maven { url = 'https://repo.spongepowered.org/repository/maven-public/' } // Mixin (body proportions in game)
-    mavenCentral()
-}
-
-dependencies {
-    implementation minecraft.dependency('net.minecraftforge:forge:26.3-66.1.8')
-    annotationProcessor 'net.minecraftforge:eventbus-validator:7.0.6'
-    // Mixin API for compiling only; Forge provides Mixin at runtime. 26.x is unobfuscated, so no refmap is needed.
-    compileOnly 'org.spongepowered:mixin:0.8.7'
-    testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
-    testRuntimeOnly 'org.junit.platform:junit-platform-launcher' // required since Gradle 9, otherwise the :test task fails
-}
-
-tasks.withType(JavaCompile).configureEach {
-    // Use the UTF-8 charset for Java compilation
-    // This is done by default in Java 18+, but this ensures it no matter the Java or Gradle version
-    options.encoding = 'UTF-8'
-}
-
-// ---- Skin Switch: download capes at BUILD time -------------------------------------------------------------------
-// Bundles curated Mojang texture URLs plus up to 50 extra 64x32 cape textures from the MIT-licensed
-// devvyyxyz/abc-capes GitHub collection. Network failures are non-fatal; local and already-curated capes remain.
-tasks.register('downloadCapes') {
-    def listFile = file('capes-sources.txt')
-    def capesLocalDir = file('capes-local') // resolved at configuration time (configuration-cache friendly)
-    def outDir = layout.buildDirectory.dir('generated/capes/assets/skinswitch/capes')
-    def communityArchive = layout.buildDirectory.file('downloads/abc-capes-main.zip')
-    inputs.file(listFile)
-    inputs.dir(capesLocalDir).optional()
-    outputs.dir(outDir)
-    outputs.upToDateWhen { false } // refresh remote collection when building a release
-    doLast {
-        def dir = outDir.get().asFile
-        dir.mkdirs()
-        dir.listFiles()?.each { f -> if (f.isFile()) f.delete() }
-        def index = []
-        def seenHashes = new HashSet<String>()
-        def usedNames = new HashSet<String>()
-        def sha = java.security.MessageDigest.getInstance('SHA-256')
-        def safeName = { String raw ->
-            String base = (raw ?: 'Cape').replaceAll(/(?i)\.png$/, '').replaceAll(/[^A-Za-z0-9._-]/, '_')
-            if (!base || base == '.' || base == '..') base = 'Cape'
-            String candidate = base
-            int suffix = 2
-            while (usedNames.contains(candidate.toLowerCase(Locale.ROOT))) candidate = base + '_' + (suffix++)
-            usedNames.add(candidate.toLowerCase(Locale.ROOT))
-            candidate + '.png'
-        }
-        def addCape = { byte[] data, String displayName, String source ->
-            if (data == null || data.length < 24 || data[0] != (byte)0x89 || data[1] != (byte)'P' || data[2] != (byte)'N' || data[3] != (byte)'G') return false
-            try {
-                def image = javax.imageio.ImageIO.read(new ByteArrayInputStream(data))
-                if (image == null) return false
-                int w = image.width, h = image.height
-                // CapeImage supports 64x32 sheets and vertical animated strips (including HD multiples).
-                if (w < 64 || w % 64 != 0) return false
-                int frameHeight = 32 * (w / 64)
-                if (h < frameHeight || h % frameHeight != 0) return false
-                String hash = java.util.HexFormat.of().formatHex(sha.digest(data))
-                if (!seenHashes.add(hash)) return false
-                String fileName = safeName(displayName)
-                new File(dir, fileName).bytes = data
-                index << (fileName + '|' + displayName)
-                logger.lifecycle('Cape bundled: ' + displayName + ' (' + source + ')')
-                return true
-            } catch (Exception ignored) { return false }
-        }
-
-        // Existing curated Mojang texture URLs (includes official Minecraft capes).
-        listFile.eachLine { raw ->
-            def line = raw.trim()
-            if (!line || line.startsWith('#')) return
-            def parts = line.split('\\s+', 2)
-            def url = parts[0]
-            def name = parts.length > 1 ? parts[1] : url.tokenize('/').last().replaceAll(/(?i)\.png$/, '')
-            try {
-                def conn = new URL(url.replaceFirst('^http:', 'https:')).openConnection()
-                conn.setRequestProperty('User-Agent', 'SkinSwitch-build/43.2')
-                conn.connectTimeout = 15000
-                conn.readTimeout = 30000
-                addCape(conn.inputStream.bytes, name, 'textures.minecraft.net')
-            } catch (Exception e) {
-                logger.warn('Official cape skipped (' + url + '): ' + e.message)
-            }
-        }
-
-        // Add up to 50 extra capes from a public GitHub collection. The upstream repository is MIT licensed.
-        int communityAdded = 0
-        try {
-            def archiveFile = communityArchive.get().asFile
-            archiveFile.parentFile.mkdirs()
-            def conn = new URL('https://codeload.github.com/devvyyxyz/abc-capes/zip/refs/heads/main').openConnection()
-            conn.setRequestProperty('User-Agent', 'SkinSwitch-build/43.2')
-            conn.connectTimeout = 20000
-            conn.readTimeout = 60000
-            archiveFile.bytes = conn.inputStream.bytes
-            new java.util.zip.ZipFile(archiveFile).withCloseable { zip ->
-                def entries = java.util.Collections.list(zip.entries()).findAll { !it.directory && it.name.toLowerCase(Locale.ROOT).endsWith('.png') }.sort { it.name }
-                for (entry in entries) {
-                    if (communityAdded >= 50) break
-                    byte[] data = zip.getInputStream(entry).withCloseable { it.bytes }
-                    String rawName = entry.name.tokenize('/').last().replaceAll(/(?i)\.png$/, '')
-                    String display = 'Community - ' + rawName.replaceAll(/[_-]+/, ' ')
-                    if (addCape(data, display, 'github.com/devvyyxyz/abc-capes')) communityAdded++
-                }
-                def licenseEntry = java.util.Collections.list(zip.entries()).find { !it.directory && (it.name.equalsIgnoreCase('LICENSE') || it.name.toLowerCase(Locale.ROOT).endsWith('/license')) }
-                if (licenseEntry != null) {
-                    new File(dir, 'COMMUNITY-CAPES-LICENSE.txt').bytes = zip.getInputStream(licenseEntry).withCloseable { it.bytes }
-                }
-            }
-            logger.lifecycle('Community cape collection: ' + communityAdded + ' additional cape(s) added (maximum 50).')
-            new File(dir, 'SOURCES.txt').text = 'Official textures: https://textures.minecraft.net/texture/<texture-id>\nCommunity collection: https://github.com/devvyyxyz/abc-capes (MIT license)\nOnly valid Minecraft cape PNG sheets are included.\n'
-        } catch (Exception e) {
-            logger.warn('Community cape collection unavailable; continuing with official/local capes: ' + e.message)
-        }
-
-        // Also bundle original/local PNGs. Do not duplicate a downloaded texture.
-        def local = capesLocalDir
-        if (local.isDirectory()) {
-            local.listFiles({ f -> f.name.toLowerCase(Locale.ROOT).endsWith('.png') } as FileFilter).sort { it.name }.each { f ->
-                byte[] data = f.bytes
-                String name = f.name.replaceAll(/(?i)\.png$/, '')
-                if (!addCape(data, name, 'capes-local')) logger.info('Local cape skipped (duplicate or unsupported image): ' + name)
-            }
-        }
-        new File(dir, 'index.txt').text = index.join('\n')
-        logger.lifecycle('Skin Switch cape catalogue contains ' + index.size() + ' unique cape(s).')
-    }
-}
-sourceSets.main.resources { srcDir layout.buildDirectory.dir('generated/capes') }
-tasks.named('processResources') { dependsOn 'downloadCapes' }
-
-
-tasks.withType(Test).configureEach { useJUnitPlatform() }
+      - name: Upload SkinSwitch Mod
+        uses: actions/upload-artifact@v4
+        with:
+          name: SkinSwitch-Mod
+          path: build/libs/*.jar
+          if-no-files-found: error
